@@ -7,11 +7,12 @@ import { Projectile } from './entities/Projectile.js'
 import { SpawnSystem } from './systems/SpawnSystem.js'
 import { CollisionSystem } from './systems/CollisionSystem.js'
 import { LevelSystem } from './systems/LevelSystem.js'
-import { ItemSystem } from './systems/ItemSystem.js'
+import { WeaponSystem } from './systems/WeaponSystem.js'
+import { DropSystem } from './systems/DropSystem.js'
+import { WEAPONS } from './data/weapons.js'
 import { saveIfBest } from './systems/StorageSystem.js'
-import { expPerKill } from './data/items.js'
 import { HUD } from './ui/HUD.jsx'
-import { ItemSelectModal } from './ui/ItemSelectModal.jsx'
+import { WeaponSelectModal } from './ui/WeaponSelectModal.jsx'
 import { MainMenu } from './ui/MainMenu.jsx'
 import { GameOver } from './ui/GameOver.jsx'
 import { PauseMenu } from './ui/PauseMenu.jsx'
@@ -23,8 +24,11 @@ export default function App() {
   const canvasRef = useRef(null)
   const gameRef = useRef(null)
   const [screen, setScreen] = useState('menu')
-  const [hudData, setHudData] = useState({ hp: 100, maxHp: 100, expPercent: 0, level: 1, kills: 0, elapsed: 0 })
-  const [levelUpItems, setLevelUpItems] = useState([])
+  const [hudData, setHudData] = useState({
+    hp: 100, maxHp: 100, expPercent: 0, level: 1, kills: 0, elapsed: 0,
+    weapons: [], weaponUpgrades: {},
+  })
+  const [levelUpWeapons, setLevelUpWeapons] = useState([])
   const [gameOverData, setGameOverData] = useState(null)
   const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
 
@@ -42,87 +46,109 @@ export default function App() {
     const spawnSystem = new SpawnSystem(W, H)
     const collisionSystem = new CollisionSystem()
     const levelSystem = new LevelSystem()
-    const itemSystem = new ItemSystem()
+    const weaponSystem = new WeaponSystem()
+    const dropSystem = new DropSystem()
+
+    // 시작 기본 무기: 마법 지팡이
+    weaponSystem.equip(WEAPONS.find(w => w.id === 'magic_wand'))
 
     let enemies = []
     let projectiles = []
     let expDrops = []
+    let dropItems = []
     let elapsed = 0
     let paused = false
     let awaitingLevelUp = false
 
     const state = {
       renderer, input, player, spawnSystem, collisionSystem,
-      levelSystem, itemSystem, enemies, projectiles, expDrops,
+      levelSystem, weaponSystem, dropSystem,
+      enemies, projectiles, expDrops, dropItems,
+    }
+
+    const handleLevelUp = (leveled) => {
+      if (leveled.length === 0) return
+      for (let i = 0; i < leveled.length; i++) {
+        player.maxHp += 20
+        player.hp = Math.min(player.hp + 20, player.maxHp)
+      }
+      awaitingLevelUp = true
+      const choices = weaponSystem.getRandomChoices(3)
+      setLevelUpWeapons(choices)
+      setScreen('levelup')
+    }
+
+    const handleDropPickup = (drop) => {
+      const extras = dropSystem.applyPickup(drop, player, state.enemies, state.expDrops, (expVal) => {
+        const leveled = levelSystem.addExp(expVal)
+        handleLevelUp(leveled)
+      })
+      if (extras && extras.length > 0) {
+        state.dropItems = dropItems = [...dropItems, ...extras]
+      }
     }
 
     const update = (dt) => {
       if (paused || awaitingLevelUp) return
       elapsed += dt
 
-      // ESC toggle pause
-      if (input.isEscPressed()) {
-        // handled via keyup event to avoid repeat
-      }
-
       player.update(dt, input, W, H)
 
-      // shooting
-      const shots = player.tryShoot(enemies)
-      for (const s of shots) {
-        projectiles.push(new Projectile(
-          s.x, s.y, s.tx, s.ty,
-          player.effectiveAtk,
-          player.pierce,
-          player.explosiveShots > 0,
-        ))
-      }
+      // weapon system fires and returns new projectiles
+      const newProjs = weaponSystem.update(dt, player, state.enemies)
+      for (const p of newProjs) projectiles.push(p)
 
       // enemy update
-      for (const e of enemies) {
-        e.update(dt, player, enemies, W, H)
-        // mage projectile
+      for (const e of state.enemies) {
+        e.update(dt, player, state.enemies, W, H)
         if (e.tryShoot) {
           const p = e.tryShoot(player)
-          if (p) projectiles.push(new Projectile(p.x, p.y, p.tx, p.ty, 0, 0, false, true, p.damage))
+          if (p) projectiles.push(new Projectile(p.x, p.y, p.tx, p.ty, 0, { fromEnemy: true, damage: p.damage }))
         }
       }
 
       // projectiles update
       for (const p of projectiles) p.update(dt, W, H)
 
+      // drop items update
+      for (const d of dropItems) d.update(dt)
+
       // spawn
       const spawned = spawnSystem.update(dt, levelSystem.level)
-      enemies.push(...spawned)
+      state.enemies = enemies = [...enemies, ...spawned]
 
       // collision
-      collisionSystem.update(dt, player, enemies, projectiles, expDrops, (expVal) => {
-        const leveled = levelSystem.addExp(expVal)
-        if (leveled.length > 0) {
-          awaitingLevelUp = true
-          const choices = itemSystem.getRandomChoices(3)
-          setLevelUpItems(choices)
-          setScreen('levelup')
-        }
-      })
+      collisionSystem.update(
+        dt, player, state.enemies, projectiles, expDrops,
+        (expVal) => {
+          const leveled = levelSystem.addExp(expVal)
+          handleLevelUp(leveled)
+        },
+        dropItems,
+        handleDropPickup,
+      )
 
-      // count kills from newly dead enemies this frame
-      const newKills = enemies.filter(e => e.dead).length
-      for (let i = 0; i < newKills; i++) levelSystem.addKill()
+      // count new kills, spawn drops
+      for (const e of state.enemies) {
+        if (e.dead && !e._dropChecked) {
+          e._dropChecked = true
+          levelSystem.addKill()
+          const drop = dropSystem.spawnFromKill(e.x, e.y)
+          if (drop) dropItems.push(drop)
+        }
+      }
 
       // cull dead
-      enemies = state.enemies = enemies.filter(e => !e.dead)
-      projectiles = state.projectiles = projectiles.filter(p => !p.dead)
-      expDrops = state.expDrops = expDrops.filter(d => !d.dead)
+      state.enemies = enemies = enemies.filter(e => !e.dead)
+      state.projectiles = projectiles = projectiles.filter(p => !p.dead)
+      state.expDrops = expDrops = expDrops.filter(d => !d.dead)
+      state.dropItems = dropItems = dropItems.filter(d => !d.dead)
 
       // game over
       if (player.dead) {
         const result = saveIfBest(elapsed, levelSystem.kills)
         setGameOverData({
-          elapsed,
-          kills: levelSystem.kills,
-          level: levelSystem.level,
-          ...result,
+          elapsed, kills: levelSystem.kills, level: levelSystem.level, ...result,
         })
         setScreen('gameover')
         loop.stop()
@@ -135,6 +161,8 @@ export default function App() {
         level: levelSystem.level,
         kills: levelSystem.kills,
         elapsed,
+        weapons: [...weaponSystem.equipped],
+        weaponUpgrades: { ...weaponSystem.upgrades },
       })
     }
 
@@ -143,8 +171,11 @@ export default function App() {
       const ctx = renderer.ctx
 
       for (const d of state.expDrops) d.draw(ctx)
+      for (const d of state.dropItems) d.draw(ctx)
       for (const e of state.enemies) e.draw(ctx)
       for (const p of state.projectiles) p.draw(ctx)
+      for (const orb of weaponSystem.orbitals) orb.draw(ctx)
+      weaponSystem.drawEffects(ctx)
       collisionSystem.drawExplosions(ctx)
       player.draw(ctx)
     }
@@ -152,12 +183,16 @@ export default function App() {
     const loop = new GameLoop(update, render)
 
     gameRef.current = {
-      loop, input, player, levelSystem, itemSystem,
+      loop, input, player, levelSystem, weaponSystem,
       getElapsed: () => elapsed,
       setPaused: (v) => { paused = v },
       setAwaitingLevelUp: (v) => { awaitingLevelUp = v },
-      applyItem: (item) => {
-        itemSystem.apply(item, player)
+      applyWeapon: (weapon) => {
+        weaponSystem.equip(weapon)
+        // link orbital owner to player
+        for (const orb of weaponSystem.orbitals) {
+          if (!orb.owner) orb.owner = player
+        }
         awaitingLevelUp = false
         paused = false
         setScreen('playing')
@@ -184,8 +219,8 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [screen])
 
-  const handleItemSelect = useCallback((item) => {
-    gameRef.current?.applyItem(item)
+  const handleWeaponSelect = useCallback((weapon) => {
+    gameRef.current?.applyWeapon(weapon)
   }, [])
 
   const handleResume = useCallback(() => {
@@ -214,8 +249,12 @@ export default function App() {
         <HUD {...hudData} />
       )}
 
-      {screen === 'levelup' && levelUpItems.length > 0 && (
-        <ItemSelectModal items={levelUpItems} onSelect={handleItemSelect} />
+      {screen === 'levelup' && levelUpWeapons.length > 0 && (
+        <WeaponSelectModal
+          weapons={levelUpWeapons}
+          upgrades={gameRef.current?.weaponSystem?.upgrades || {}}
+          onSelect={handleWeaponSelect}
+        />
       )}
 
       {screen === 'paused' && gameRef.current && (

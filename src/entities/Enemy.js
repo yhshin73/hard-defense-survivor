@@ -1,3 +1,14 @@
+const imageCache = {}
+
+function loadImage(src) {
+  if (!imageCache[src]) {
+    const img = new Image()
+    img.src = src
+    imageCache[src] = img
+  }
+  return imageCache[src]
+}
+
 export class Enemy {
   constructor(stats, x, y) {
     Object.assign(this, stats)
@@ -8,8 +19,8 @@ export class Enemy {
     this.flashTimer = 0
     this.dead = false
     this.attackTimer = 1.0
-    // disperse AI
     this.disperseAngle = Math.random() * Math.PI * 2
+    if (stats.image) this._img = loadImage(stats.image)
   }
 
   update(dt, player, enemies, canvasW, canvasH) {
@@ -32,7 +43,9 @@ export class Enemy {
 
   _move(dt, player, enemies, canvasW, canvasH) {
     if (this.hitTimer > 0) return
-    const spd = this.speed * 60 * dt
+    if (this.slowTimer > 0) this.slowTimer -= dt
+    const slowMult = (this.slowTimer > 0 && this.slowFactor != null) ? this.slowFactor : 1
+    const spd = this.speed * 60 * dt * slowMult
 
     if (this.ranged) {
       this._moveRanged(spd, player, canvasW, canvasH)
@@ -73,23 +86,50 @@ export class Enemy {
 
   draw(ctx) {
     const flash = this.flashTimer > 0
+    const r = this.radius
     ctx.save()
-    ctx.beginPath()
-    ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2)
-    ctx.fillStyle = flash ? '#ffffff' : this.color
-    ctx.fill()
 
-    if (this.isBoss) {
-      ctx.strokeStyle = '#ff0000'
-      ctx.lineWidth = 3
-      ctx.stroke()
+    if (this._img && this._img.complete && this._img.naturalWidth > 0) {
+      ctx.save()
+      ctx.beginPath()
+      ctx.arc(this.x, this.y, r, 0, Math.PI * 2)
+      ctx.clip()
+
+      if (flash) {
+        ctx.globalAlpha = 0.5
+        ctx.fillStyle = '#ffffff'
+        ctx.fill()
+        ctx.globalAlpha = 1
+      }
+
+      ctx.drawImage(this._img, this.x - r, this.y - r, r * 2, r * 2)
+      ctx.restore()
+
+      if (this.isBoss) {
+        ctx.beginPath()
+        ctx.arc(this.x, this.y, r, 0, Math.PI * 2)
+        ctx.strokeStyle = '#ff0000'
+        ctx.lineWidth = 3
+        ctx.stroke()
+      }
+    } else {
+      ctx.beginPath()
+      ctx.arc(this.x, this.y, r, 0, Math.PI * 2)
+      ctx.fillStyle = flash ? '#ffffff' : this.color
+      ctx.fill()
+
+      if (this.isBoss) {
+        ctx.strokeStyle = '#ff0000'
+        ctx.lineWidth = 3
+        ctx.stroke()
+      }
     }
 
     // HP bar
-    const bw = this.radius * 2
+    const bw = r * 2
     const bh = 4
-    const bx = this.x - this.radius
-    const by = this.y - this.radius - 8
+    const bx = this.x - r
+    const by = this.y - r - 8
     ctx.fillStyle = '#333'
     ctx.fillRect(bx, by, bw, bh)
     ctx.fillStyle = this.isBoss ? '#ff4400' : '#ff2222'

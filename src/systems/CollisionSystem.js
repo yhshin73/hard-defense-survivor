@@ -1,4 +1,4 @@
-import { Projectile, ExpDrop, drawExplosion } from '../entities/Projectile.js'
+import { ExpDrop, drawExplosion } from '../entities/Projectile.js'
 
 const EXPLOSION_RADIUS = 80
 
@@ -7,7 +7,8 @@ export class CollisionSystem {
     this.explosions = [] // { x, y, timer }
   }
 
-  update(dt, player, enemies, projectiles, expDrops, onExpGain) {
+  // dropItems and onDropPickup are optional
+  update(dt, player, enemies, projectiles, expDrops, onExpGain, dropItems, onDropPickup) {
     // player projectiles vs enemies
     for (const proj of projectiles) {
       if (proj.dead || proj.fromEnemy) continue
@@ -17,6 +18,12 @@ export class CollisionSystem {
           const wasAlive = !enemy.dead
           enemy.takeDamage(proj.atk)
           proj.hitEnemies.add(enemy)
+
+          // slow effect (ice_spear)
+          if (proj.slow > 0) {
+            enemy.slowTimer = Math.max(enemy.slowTimer || 0, proj.slowDuration || 2)
+            enemy.slowFactor = 1 - proj.slow
+          }
 
           if (proj.explosive && !proj.dead) {
             this.explosions.push({ x: enemy.x, y: enemy.y, timer: 0.3 })
@@ -35,10 +42,17 @@ export class CollisionSystem {
           }
 
           if (wasAlive && enemy.dead) {
-            // enemy died from this hit
             expDrops.push(new ExpDrop(enemy.x, enemy.y, enemy.exp))
-            if (player.splitOnKill) {
-              this._spawnSplitProjectiles(proj, enemy, projectiles, player)
+          }
+
+          // thunder lance chain
+          if (proj.chain && wasAlive) {
+            const chainTarget = _nearestAlive(enemy, enemies, 120)
+            if (chainTarget) {
+              chainTarget.takeDamage(Math.floor(proj.atk * 0.7))
+              if (chainTarget.dead) {
+                expDrops.push(new ExpDrop(chainTarget.x, chainTarget.y, chainTarget.exp))
+              }
             }
           }
         }
@@ -58,10 +72,20 @@ export class CollisionSystem {
     const absorbRange = player.expRange
     for (const drop of expDrops) {
       if (drop.dead) continue
-      const d = Math.hypot(drop.x - player.x, drop.y - player.y)
-      if (d < absorbRange) {
+      if (Math.hypot(drop.x - player.x, drop.y - player.y) < absorbRange) {
         drop.dead = true
         onExpGain(drop.value)
+      }
+    }
+
+    // ground drop items vs player
+    if (dropItems && onDropPickup) {
+      for (const drop of dropItems) {
+        if (drop.dead) continue
+        if (Math.hypot(drop.x - player.x, drop.y - player.y) < player.radius + drop.radius) {
+          drop.dead = true
+          onDropPickup(drop)
+        }
       }
     }
 
@@ -81,19 +105,18 @@ export class CollisionSystem {
       ctx.globalAlpha = 1
     }
   }
-
-  _spawnSplitProjectiles(proj, enemy, projectiles, player) {
-    const angles = [Math.PI / 4, -Math.PI / 4]
-    const baseAngle = Math.atan2(proj.vy, proj.vx)
-    for (const offset of angles) {
-      const a = baseAngle + offset
-      const tx = enemy.x + Math.cos(a) * 200
-      const ty = enemy.y + Math.sin(a) * 200
-      projectiles.push(new Projectile(enemy.x, enemy.y, tx, ty, player.effectiveAtk, 0, false))
-    }
-  }
 }
 
 function circleHit(a, b) {
   return Math.hypot(a.x - b.x, a.y - b.y) < (a.radius || 6) + (b.radius || 16)
+}
+
+function _nearestAlive(origin, enemies, maxDist) {
+  let best = null, bestD = maxDist
+  for (const e of enemies) {
+    if (e.dead || e === origin) continue
+    const d = Math.hypot(e.x - origin.x, e.y - origin.y)
+    if (d < bestD) { bestD = d; best = e }
+  }
+  return best
 }
